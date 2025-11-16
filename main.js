@@ -1,9 +1,10 @@
 import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js?module';
 import { OrbitControls } from 'https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js?module';
+import { GLTFLoader } from 'https://unpkg.com/three@0.160.0/examples/jsm/loaders/GLTFLoader.js?module';
 import * as CANNON from 'https://cdn.skypack.dev/cannon-es';
 
 let scene, camera, renderer, controls;
-let pedestal, spotLight;
+let pedestal, spotLight, gltfModel;
 let world, curtainBody, curtainMesh;
 let curtainRemoved = false;
 const clock = new THREE.Clock();
@@ -11,11 +12,12 @@ const clock = new THREE.Clock();
 init();
 
 function init() {
-  console.log("Iniciando cena base Three.js...");
+  console.log("Iniciando cena Three.js...");
   const canvas = document.querySelector('#three-canvas');
 
   scene = new THREE.Scene();
 
+  // Loader de texturas
   const texLoader = new THREE.TextureLoader();
 
   // SKYBOX com textura de céu (equiretangular)
@@ -76,7 +78,7 @@ function init() {
   floor.receiveShadow = true;
   scene.add(floor);
 
-  // Pedestal (cubo)
+  // Pedestal (cubo embaixo do carro)
   const pedestalHeight = 0.8;
   const pedestalGeom = new THREE.BoxGeometry(4, pedestalHeight, 8);
   const pedestalMat = new THREE.MeshStandardMaterial({
@@ -90,7 +92,7 @@ function init() {
   pedestal.receiveShadow = true;
   scene.add(pedestal);
 
-  // SpotLight apontando para o pedestal
+  // SpotLight apontando para o pedestal / carro
   spotLight = new THREE.SpotLight(0xffffff, 1.6, 60, Math.PI / 5, 0.4, 1);
   spotLight.position.set(-2, 12, 10);
   spotLight.castShadow = true;
@@ -98,7 +100,81 @@ function init() {
   scene.add(spotLight);
   scene.add(spotLight.target);
 
-  // Mundo de física cannon-es
+  // Asset GLTF externo (Ferrari F40)
+  const gltfLoader = new GLTFLoader();
+  gltfLoader.load(
+    './assets/models/scene.gltf',
+    (gltf) => {
+      console.log('GLTF carregado com sucesso');
+      gltfModel = gltf.scene;
+
+      // Converte materiais complicados para MeshStandardMaterial,
+      // reaproveitando texturas e cores originais.
+      gltfModel.traverse((obj) => {
+        if (!obj.isMesh) return;
+
+        const orig = obj.material;
+        if (!orig) return;
+
+        const origMats = Array.isArray(orig) ? orig : [orig];
+        const newMats = [];
+
+        origMats.forEach((m) => {
+          if (!m) return;
+          const nm = new THREE.MeshStandardMaterial({
+            color: (m.color && m.color.clone()) || new THREE.Color(0xffffff),
+            metalness: m.metalness !== undefined ? m.metalness : 0.7,
+            roughness: m.roughness !== undefined ? m.roughness : 0.4,
+            envMapIntensity: 1.0
+          });
+          if (m.map) nm.map = m.map;
+          if (m.normalMap) nm.normalMap = m.normalMap;
+          if (m.roughnessMap) nm.roughnessMap = m.roughnessMap;
+          if (m.metalnessMap) nm.metalnessMap = m.metalnessMap;
+          if (m.emissive) nm.emissive = m.emissive.clone();
+          if (m.emissiveMap) nm.emissiveMap = m.emissiveMap;
+
+          newMats.push(nm);
+
+          // libera material original
+          m.dispose?.();
+        });
+
+        obj.material = newMats.length === 1 ? newMats[0] : newMats;
+        obj.castShadow = true;
+        obj.receiveShadow = true;
+      });
+
+      // Centraliza o modelo e calcula tamanho para posicionar sobre o pedestal
+      const box = new THREE.Box3().setFromObject(gltfModel);
+      const size = new THREE.Vector3();
+      const center = new THREE.Vector3();
+      box.getSize(size);
+      box.getCenter(center);
+
+      gltfModel.position.sub(center); // centraliza pivot
+      const carY = pedestalHeight + size.y / 2;
+
+      gltfModel.position.x = -6;
+      gltfModel.position.y = carY;
+      gltfModel.position.z = 0;
+
+      // Escala se for muito grande
+      const maxDim = Math.max(size.x, size.y, size.z);
+      if (maxDim > 10) {
+        const scaleFactor = 10 / maxDim;
+        gltfModel.scale.setScalar(scaleFactor);
+      }
+
+      scene.add(gltfModel);
+    },
+    undefined,
+    (error) => {
+      console.error('Erro ao carregar GLTF:', error);
+    }
+  );
+
+  // Mundo de física cannon-es (bônus)
   world = new CANNON.World({
     gravity: new CANNON.Vec3(0, -9.82, 0)
   });
@@ -112,7 +188,7 @@ function init() {
   groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
   world.addBody(groundBody);
 
-  // "Cortina" como um cubo que cobre a área do pedestal
+  // "Cortina" como um cubo que cobre o carro
   const curtainSize = { x: 4.5, y: 4, z: 8.5 };
   const curtainGeom = new THREE.BoxGeometry(
     curtainSize.x,
@@ -122,23 +198,15 @@ function init() {
 
   const curtainTex = texLoader.load(
     './assets/textures/curtain.jpg',
-    () => {
-      console.log('Textura de cortina carregada.');
-      curtainTex.wrapS = THREE.RepeatWrapping;
-      curtainTex.wrapT = THREE.RepeatWrapping;
-      curtainTex.repeat.set(1, 2);
-    },
+    () => console.log('Textura de cortina carregada.'),
     undefined,
-    () => {
-      console.warn('Textura curtain.jpg não encontrada, usando somente cor.');
-    }
+    () => console.warn('Falha ao carregar curtain.jpg, usando somente cor.')
   );
 
   const curtainMat = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
+    color: 0xaa0000,
     map: curtainTex,
-    roughness: 0.8,
-    side: THREE.DoubleSide
+    roughness: 0.8
   });
 
   curtainMesh = new THREE.Mesh(curtainGeom, curtainMat);
@@ -155,7 +223,6 @@ function init() {
       curtainSize.z / 2
     )
   );
-
   curtainBody = new CANNON.Body({
     mass: 0,
     shape: curtainShape,
@@ -163,7 +230,7 @@ function init() {
   });
   world.addBody(curtainBody);
 
-  // Clique: remove cortina da cena
+  // Clique: remove cortina da cena (revelação do carro)
   window.addEventListener('click', () => {
     if (curtainRemoved) return;
     curtainRemoved = true;
@@ -189,6 +256,10 @@ function init() {
 function update(delta) {
   if (world) {
     world.step(1 / 60, delta, 3);
+  }
+
+  if (gltfModel) {
+    gltfModel.rotation.y += delta * 0.4;
   }
 }
 
